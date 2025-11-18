@@ -3,7 +3,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <netinet/tcp.h>
 
 int main(int argc, char *argv[]) {
     if (argc < 4) {
@@ -28,12 +27,17 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in local;
     socklen_t len = sizeof(local);
     getsockname(s, (struct sockaddr*)&local, &len);
-    printf("Client source port: %d\n", ntohs(local.sin_port));
+    printf("CLIENT SOURCE PORT = %d\n", ntohs(local.sin_port));
 
-    printf("Press ENTER after performing your attack...\n");
-    getchar();
+    printf("Waiting so you can run your attack...\n");
+    fflush(stdout);
 
+    // THIS IS CRITICAL
+    sleep(240);     // enough time to run RST and INJECT attacks
+
+    printf("Sending REALDATA now...\n");
     send(s, msg, strlen(msg), 0);
+
     close(s);
     return 0;
 }
