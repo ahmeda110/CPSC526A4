@@ -41,7 +41,7 @@ int main(int argc, char *argv[]) {
 
     printf("USE THESE VALUES FOR ATTACK:\n");
     printf("  client seq = %u\n", info.tcpi_unacked);
-    printf("  client ack = %u\n", info.tcpi_snd_una);
+    printf("  client ack = %u\n", info.tcpi_snd_mss);
 
     printf("\nSleeping 12 seconds... Perform your attack now.\n");
     sleep(12);
