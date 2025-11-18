@@ -44,7 +44,7 @@ int main(int argc, char *argv[]) {
     printf("  client ack = %u\n", info.tcpi_snd_mss);
 
     printf("\nSleeping 12 seconds... Perform your attack now.\n");
-    sleep(12);
+    sleep(210);
 
     send(s, msg, strlen(msg), 0);
     close(s);
