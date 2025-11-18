@@ -33,7 +33,7 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
 
     // THIS IS CRITICAL
-    sleep(240);     // enough time to run RST and INJECT attacks
+    sleep(120);     // enough time to run RST and INJECT attacks
 
     printf("Sending REALDATA now...\n");
     send(s, msg, strlen(msg), 0);
