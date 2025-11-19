@@ -68,7 +68,7 @@ int main(int argc, char *argv[]) {
 
     
     printf("client: sleeping 20 seconds before sending data...\n");
-    sleep(20);
+    sleep(200);
 
     ssize_t sent = send(sockfd, MSG, strlen(MSG), 0);
     if (sent == -1) {
