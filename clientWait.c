@@ -1,74 +1,84 @@
-// client_wait.c
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include <errno.h>
+#include <string.h>
+#include <netdb.h>
+#include <sys/types.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+#define PORT "34933"      // port plus UCID
+#define MSG  "Hello from client (UCID 5041)!\n"
+
+void *get_in_addr(struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET)
+        return &(((struct sockaddr_in*)sa)->sin_addr);
+    return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
 
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: ./client_wait <server_ip> <message> [port]\n");
+    int sockfd;
+    struct addrinfo hints, *servinfo, *p;
+    int rv;
+    char s[INET6_ADDRSTRLEN];
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <server_ip>\n", argv[0]);
+        exit(1);
+    }
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if ((rv = getaddrinfo(argv[1], PORT, &hints, &servinfo)) != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
         return 1;
     }
 
-    char *server_ip = argv[1];
-    char *msg       = argv[2];
-    int port        = 34933;   // default
-    if (argc >= 4) {
-        port = atoi(argv[3]);
+    for (p = servinfo; p != NULL; p = p->ai_next) {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+            perror("client: socket");
+            continue;
+        }
+
+        inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr), s, sizeof s);
+        printf("client: attempting connection to %s\n", s);
+
+        if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            perror("client: connect");
+            close(sockfd);
+            continue;
+        }
+
+        break;
     }
 
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) {
-        perror("socket");
-        return 1;
+    if (p == NULL) {
+        fprintf(stderr, "client: failed to connect\n");
+        return 2;
     }
 
-    struct sockaddr_in srv;
-    memset(&srv, 0, sizeof(srv));
-    srv.sin_family = AF_INET;
-    srv.sin_port   = htons(port);
-    if (inet_pton(AF_INET, server_ip, &srv.sin_addr) <= 0) {
-        perror("inet_pton");
-        close(s);
-        return 1;
-    }
+    inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr), s, sizeof s);
+    printf("client: connected to %s\n", s);
 
-    if (connect(s, (struct sockaddr *)&srv, sizeof(srv)) < 0) {
-        perror("connect");
-        close(s);
-        return 1;
-    }
+    freeaddrinfo(servinfo);
 
-    printf("Client connected to %s:%d\n", server_ip, port);
+    
+    printf("client: sleeping 20 seconds before sending data...\n");
+    sleep(20);
 
-    // Print local (source) port – needed for RST and inject
-    struct sockaddr_in local;
-    socklen_t len = sizeof(local);
-    if (getsockname(s, (struct sockaddr *)&local, &len) == 0) {
-        int src_port = ntohs(local.sin_port);
-        printf("Client source port: %d\n", src_port);
-    }
-
-    fflush(stdout);
-
-    // Sleep to give you time to capture the handshake and run your attack
-    printf("Client sleeping 20 seconds BEFORE sending data...\n");
-    fflush(stdout);
-    sleep(180);
-
-    ssize_t sent = send(s, msg, strlen(msg), 0);
-    if (sent < 0) {
+    ssize_t sent = send(sockfd, MSG, strlen(MSG), 0);
+    if (sent == -1) {
         perror("send");
-        close(s);
-        return 1;
+        close(sockfd);
+        return 3;
     }
 
-    printf("Client: sent %zd bytes: \"%s\"\n", sent, msg);
-    fflush(stdout);
+    printf("client: sent %zd bytes\n", sent);
 
-    close(s);
+    close(sockfd);
     return 0;
 }
