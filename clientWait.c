@@ -1,23 +1,23 @@
+// client_wait.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        printf("Usage: ./client_wait <server_ip> <port> <message> [delay_seconds]\n");
+    if (argc < 3) {
+        fprintf(stderr, "Usage: ./client_wait <server_ip> <message> [port]\n");
         return 1;
     }
 
     char *server_ip = argv[1];
-    int port = atoi(argv[2]);
-    char *msg = argv[3];
-
-    int delay = 180; // default 60 seconds
-    if (argc >= 5) {
-        delay = atoi(argv[4]);
+    char *msg       = argv[2];
+    int port        = 34933;   // default
+    if (argc >= 4) {
+        port = atoi(argv[3]);
     }
 
     int s = socket(AF_INET, SOCK_STREAM, 0);
@@ -30,9 +30,13 @@ int main(int argc, char *argv[]) {
     memset(&srv, 0, sizeof(srv));
     srv.sin_family = AF_INET;
     srv.sin_port   = htons(port);
-    inet_pton(AF_INET, server_ip, &srv.sin_addr);
+    if (inet_pton(AF_INET, server_ip, &srv.sin_addr) <= 0) {
+        perror("inet_pton");
+        close(s);
+        return 1;
+    }
 
-    if (connect(s, (struct sockaddr*)&srv, sizeof(srv)) < 0) {
+    if (connect(s, (struct sockaddr *)&srv, sizeof(srv)) < 0) {
         perror("connect");
         close(s);
         return 1;
@@ -40,25 +44,30 @@ int main(int argc, char *argv[]) {
 
     printf("Client connected to %s:%d\n", server_ip, port);
 
+    // Print local (source) port – needed for RST and inject
     struct sockaddr_in local;
     socklen_t len = sizeof(local);
-    if (getsockname(s, (struct sockaddr*)&local, &len) == 0) {
-        printf("Client source port: %d\n", ntohs(local.sin_port));
+    if (getsockname(s, (struct sockaddr *)&local, &len) == 0) {
+        int src_port = ntohs(local.sin_port);
+        printf("Client source port: %d\n", src_port);
     }
 
-    printf("Sleeping %d seconds before sending data...\n", delay);
     fflush(stdout);
-    sleep(delay);
 
-    printf("Now press ENTER after you have run your attack...\n");
+    // Sleep to give you time to capture the handshake and run your attack
+    printf("Client sleeping 20 seconds BEFORE sending data...\n");
     fflush(stdout);
-    getchar();  // wait so you have time to run ./attack R or D
+    sleep(180);
 
-    if (send(s, msg, strlen(msg), 0) < 0) {
+    ssize_t sent = send(s, msg, strlen(msg), 0);
+    if (sent < 0) {
         perror("send");
         close(s);
         return 1;
     }
+
+    printf("Client: sent %zd bytes: \"%s\"\n", sent, msg);
+    fflush(stdout);
 
     close(s);
     return 0;
