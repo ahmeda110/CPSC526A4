@@ -4,59 +4,76 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
-int main(int argc, char *argv[]) {
-    int port = 34933;              // 3 + last 4 digits of UCID
-    if (argc == 2) {
-        port = atoi(argv[1]);
-    }
+#define SERVER_PORT 34933
+#define BUF_SIZE 4096
 
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) {
+int main(void) {
+    int listen_fd, conn_fd;
+    struct sockaddr_in addr, cli_addr;
+    socklen_t cli_len = sizeof(cli_addr);
+    char buf[BUF_SIZE];
+    ssize_t n;
+
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
         perror("socket");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     int opt = 1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt");
+        close(listen_fd);
+        exit(EXIT_FAILURE);
+    }
 
-    struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(port);
+    addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(SERVER_PORT);
 
-    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind");
-        close(s);
-        exit(1);
+        close(listen_fd);
+        exit(EXIT_FAILURE);
     }
 
-    if (listen(s, 1) < 0) {
+    if (listen(listen_fd, 5) < 0) {
         perror("listen");
-        close(s);
-        exit(1);
+        close(listen_fd);
+        exit(EXIT_FAILURE);
     }
 
-    printf("Server listening on port %d...\n", port);
-    fflush(stdout);
+    printf("Server listening on port %d\n", SERVER_PORT);
 
-    int client = accept(s, NULL, NULL);
-    if (client < 0) {
-        perror("accept");
-        close(s);
-        exit(1);
+    while (1) {
+        conn_fd = accept(listen_fd, (struct sockaddr *)&cli_addr, &cli_len);
+        if (conn_fd < 0) {
+            perror("accept");
+            continue;
+        }
+
+        char cli_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &cli_addr.sin_addr, cli_ip, sizeof(cli_ip));
+        printf("New connection from %s:%d\n", cli_ip, ntohs(cli_addr.sin_port));
+
+        while ((n = read(conn_fd, buf, sizeof(buf) - 1)) > 0) {
+            buf[n] = '\0';
+            printf("Received (%zd bytes): %s\n", n, buf);
+            fflush(stdout);
+        }
+
+        if (n < 0) {
+            perror("read");
+        }
+
+        close(conn_fd);
+        printf("Connection closed.\n");
     }
 
-    char buf[2048];
-    int n;
-    while ((n = recv(client, buf, sizeof(buf) - 1, 0)) > 0) {
-        buf[n] = '\0';
-        printf("Server received: %s\n", buf);
-        fflush(stdout);
-    }
-
-    close(client);
-    close(s);
+    close(listen_fd);
     return 0;
 }
